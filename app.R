@@ -25,8 +25,7 @@ ui <- dashboardPage(
       menuItem("Data Exploration", tabName = "explore", icon = icon("search")),
       menuItem("Data Preprocessing", tabName = "preprocess", icon = icon("filter")),
       menuItem("Model Training", tabName = "model", icon = icon("brain")),
-      menuItem("Model Evaluation", tabName = "evaluate", icon = icon("chart-bar")),
-      menuItem("Predictions", tabName = "predict", icon = icon("magic"))
+      menuItem("Model Evaluation", tabName = "evaluate", icon = icon("chart-bar"))
     )
   ),
   
@@ -198,14 +197,13 @@ ui <- dashboardPage(
                 valueBoxOutput("recall_box")
               ),
               fluidRow(
+                valueBoxOutput("f1_box")
+              ),
+              fluidRow(
                 box(title = "Confusion Matrix", status = "primary", solidHeader = TRUE, width = 6,
                     plotOutput("confusion_matrix")),
                 box(title = "Classification Metrics", status = "success", solidHeader = TRUE, width = 6,
                     verbatimTextOutput("classification_report"))
-              ),
-              fluidRow(
-                box(title = "ROC Curves (Multi-class)", status = "info", solidHeader = TRUE, width = 12,
-                    plotlyOutput("roc_curve"))
               ),
               fluidRow(
                 box(title = "Model Comparison", status = "warning", solidHeader = TRUE, width = 12,
@@ -214,33 +212,6 @@ ui <- dashboardPage(
                                  class = "btn-warning"),
                     hr(),
                     plotlyOutput("model_comparison"))
-              )
-      ),
-      
-      # Predictions Tab
-      tabItem(tabName = "predict",
-              fluidRow(
-                box(title = "Make Predictions", status = "primary", solidHeader = TRUE, width = 12,
-                    p("Enter values for prediction (will be dynamically generated based on features)"),
-                    uiOutput("prediction_inputs"),
-                    actionButton("predict_btn", "Predict Sentiment", icon = icon("magic"), 
-                                 class = "btn-primary btn-lg")
-                )
-              ),
-              fluidRow(
-                box(title = "Prediction Result", status = "success", solidHeader = TRUE, width = 6,
-                    h3(textOutput("prediction_result")),
-                    verbatimTextOutput("prediction_probs")),
-                box(title = "Prediction Confidence", status = "info", solidHeader = TRUE, width = 6,
-                    plotlyOutput("prediction_plot"))
-              ),
-              fluidRow(
-                box(title = "Batch Predictions", status = "warning", solidHeader = TRUE, width = 12,
-                    fileInput("predict_file", "Upload CSV for Batch Predictions"),
-                    actionButton("batch_predict", "Generate Predictions"),
-                    hr(),
-                    downloadButton("download_predictions", "Download Results"),
-                    DTOutput("batch_results"))
               )
       )
     )
@@ -508,8 +479,17 @@ server <- function(input, output, session) {
           rv$model <- naiveBayes(formula, data = rv$train_data)
         }
         
-        # Make predictions
-        rv$predictions <- predict(rv$model, rv$test_data)
+        # Make predictions (handle different model types)
+        if(input$model_type == "dt") {
+          # Decision Tree needs type = "class" to get class labels instead of probabilities
+          rv$predictions <- predict(rv$model, rv$test_data, type = "class")
+        } else if(input$model_type == "svm") {
+          # SVM just needs the predict call
+          rv$predictions <- predict(rv$model, rv$test_data)
+        } else {
+          # Random Forest and Naive Bayes work with default predict
+          rv$predictions <- predict(rv$model, rv$test_data)
+        }
         
         showNotification("Model trained successfully!", type = "message")
         
@@ -530,16 +510,36 @@ server <- function(input, output, session) {
   output$model_summary <- renderPrint({
     req(rv$model, rv$predictions)
     
-    actual <- rv$test_data[[rv$target_col]]
-    
-    # Ensure both predictions and actual have the same factor levels
-    all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
-    predictions_factor <- factor(rv$predictions, levels = all_levels)
-    actual_factor <- factor(actual, levels = all_levels)
-    
-    cat("Model Performance on Test Set:\n\n")
-    conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
-    print(conf_matrix)
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check if predictions and actual have the same length
+      if(length(rv$predictions) != length(actual)) {
+        cat("ERROR: Predictions and actual values have different lengths!\n")
+        cat("Predictions length:", length(rv$predictions), "\n")
+        cat("Actual length:", length(actual), "\n")
+        cat("This usually means the model prediction failed.\n")
+        cat("Try retraining the model.\n")
+        return(NULL)
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      cat("Model Performance on Test Set:\n\n")
+      conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
+      print(conf_matrix)
+      
+    }, error = function(e) {
+      cat("Error generating model summary:\n")
+      cat(e$message, "\n\n")
+      cat("Predictions class:", class(rv$predictions), "\n")
+      cat("Predictions length:", length(rv$predictions), "\n")
+      cat("Actual class:", class(rv$test_data[[rv$target_col]]), "\n")
+      cat("Actual length:", length(rv$test_data[[rv$target_col]]), "\n")
+    })
   })
   
   # Feature importance
@@ -640,118 +640,230 @@ server <- function(input, output, session) {
   output$accuracy_box <- renderValueBox({
     req(rv$model, rv$predictions)
     
-    actual <- rv$test_data[[rv$target_col]]
-    
-    # Ensure both predictions and actual have the same factor levels
-    all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
-    predictions_factor <- factor(rv$predictions, levels = all_levels)
-    actual_factor <- factor(actual, levels = all_levels)
-    
-    conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
-    accuracy <- conf_matrix$overall['Accuracy']
-    
-    valueBox(
-      paste0(round(accuracy * 100, 2), "%"),
-      "Accuracy",
-      icon = icon("check-circle"),
-      color = "green"
-    )
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check lengths match
+      if(length(rv$predictions) != length(actual)) {
+        return(valueBox(
+          "Error",
+          "Length Mismatch",
+          icon = icon("exclamation-triangle"),
+          color = "red"
+        ))
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
+      accuracy <- conf_matrix$overall['Accuracy']
+      
+      valueBox(
+        paste0(round(accuracy * 100, 2), "%"),
+        "Accuracy",
+        icon = icon("check-circle"),
+        color = "green"
+      )
+    }, error = function(e) {
+      valueBox(
+        "Error",
+        "Calculation Failed",
+        icon = icon("exclamation-triangle"),
+        color = "red"
+      )
+    })
   })
   
   output$precision_box <- renderValueBox({
     req(rv$model, rv$predictions)
     
-    actual <- rv$test_data[[rv$target_col]]
-    
-    # Ensure both predictions and actual have the same factor levels
-    all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
-    predictions_factor <- factor(rv$predictions, levels = all_levels)
-    actual_factor <- factor(actual, levels = all_levels)
-    
-    conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
-    precision <- mean(conf_matrix$byClass[, 'Precision'], na.rm = TRUE)
-    
-    valueBox(
-      paste0(round(precision * 100, 2), "%"),
-      "Avg Precision",
-      icon = icon("bullseye"),
-      color = "blue"
-    )
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check lengths match
+      if(length(rv$predictions) != length(actual)) {
+        return(valueBox(
+          "Error",
+          "Length Mismatch",
+          icon = icon("exclamation-triangle"),
+          color = "red"
+        ))
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
+      precision <- mean(conf_matrix$byClass[, 'Precision'], na.rm = TRUE)
+      
+      valueBox(
+        paste0(round(precision * 100, 2), "%"),
+        "Avg Precision",
+        icon = icon("bullseye"),
+        color = "blue"
+      )
+    }, error = function(e) {
+      valueBox(
+        "Error",
+        "Calculation Failed",
+        icon = icon("exclamation-triangle"),
+        color = "red"
+      )
+    })
   })
   
   output$recall_box <- renderValueBox({
     req(rv$model, rv$predictions)
     
-    actual <- rv$test_data[[rv$target_col]]
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check lengths match
+      if(length(rv$predictions) != length(actual)) {
+        return(valueBox(
+          "Error",
+          "Length Mismatch",
+          icon = icon("exclamation-triangle"),
+          color = "red"
+        ))
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
+      recall <- mean(conf_matrix$byClass[, 'Recall'], na.rm = TRUE)
+      
+      valueBox(
+        paste0(round(recall * 100, 2), "%"),
+        "Avg Recall",
+        icon = icon("search"),
+        color = "yellow"
+      )
+    }, error = function(e) {
+      valueBox(
+        "Error",
+        "Calculation Failed",
+        icon = icon("exclamation-triangle"),
+        color = "red"
+      )
+    })
+  })
+  
+  output$f1_box <- renderValueBox({
+    req(rv$model, rv$predictions)
     
-    # Ensure both predictions and actual have the same factor levels
-    all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
-    predictions_factor <- factor(rv$predictions, levels = all_levels)
-    actual_factor <- factor(actual, levels = all_levels)
-    
-    conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
-    recall <- mean(conf_matrix$byClass[, 'Recall'], na.rm = TRUE)
-    
-    valueBox(
-      paste0(round(recall * 100, 2), "%"),
-      "Avg Recall",
-      icon = icon("search"),
-      color = "yellow"
-    )
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check lengths match
+      if(length(rv$predictions) != length(actual)) {
+        return(valueBox(
+          "Error",
+          "Length Mismatch",
+          icon = icon("exclamation-triangle"),
+          color = "red"
+        ))
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
+      f1 <- mean(conf_matrix$byClass[, 'F1'], na.rm = TRUE)
+      
+      valueBox(
+        paste0(round(f1 * 100, 2), "%"),
+        "Avg F1-Score",
+        icon = icon("star"),
+        color = "purple"
+      )
+    }, error = function(e) {
+      valueBox(
+        "Error",
+        "Calculation Failed",
+        icon = icon("exclamation-triangle"),
+        color = "red"
+      )
+    })
   })
   
   # Confusion matrix plot
   output$confusion_matrix <- renderPlot({
     req(rv$model, rv$predictions)
     
-    actual <- rv$test_data[[rv$target_col]]
-    
-    # Ensure both predictions and actual have the same factor levels
-    all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
-    predictions_factor <- factor(rv$predictions, levels = all_levels)
-    actual_factor <- factor(actual, levels = all_levels)
-    
-    cm <- table(Predicted = predictions_factor, Actual = actual_factor)
-    
-    cm_melted <- melt(cm)
-    
-    ggplot(cm_melted, aes(x = Actual, y = Predicted, fill = value)) +
-      geom_tile() +
-      geom_text(aes(label = value), color = "white", size = 6) +
-      scale_fill_gradient(low = "#3498db", high = "#e74c3c") +
-      labs(title = "Confusion Matrix", x = "Actual", y = "Predicted") +
-      theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check lengths match
+      if(length(rv$predictions) != length(actual)) {
+        plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+        text(1, 1, "Error: Predictions and actual values have different lengths", 
+             col = "red", cex = 1.5)
+        return()
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      cm <- table(Predicted = predictions_factor, Actual = actual_factor)
+      
+      cm_melted <- melt(cm)
+      
+      ggplot(cm_melted, aes(x = Actual, y = Predicted, fill = value)) +
+        geom_tile() +
+        geom_text(aes(label = value), color = "white", size = 6) +
+        scale_fill_gradient(low = "#3498db", high = "#e74c3c") +
+        labs(title = "Confusion Matrix", x = "Actual", y = "Predicted") +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+      
+    }, error = function(e) {
+      plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+      text(1, 1, paste("Error:", e$message), col = "red", cex = 1.2)
+    })
   })
   
   # Classification report
   output$classification_report <- renderPrint({
     req(rv$model, rv$predictions)
     
-    actual <- rv$test_data[[rv$target_col]]
-    
-    # Ensure both predictions and actual have the same factor levels
-    all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
-    predictions_factor <- factor(rv$predictions, levels = all_levels)
-    actual_factor <- factor(actual, levels = all_levels)
-    
-    conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
-    
-    cat("Classification Report:\n\n")
-    print(conf_matrix$byClass)
-  })
-  
-  # ROC curve placeholder
-  output$roc_curve <- renderPlotly({
-    req(rv$model, rv$predictions)
-    
-    plot_ly() %>%
-      add_trace(x = c(0, 1), y = c(0, 1), type = "scatter", mode = "lines",
-                line = list(dash = "dash", color = "gray"),
-                name = "Random Classifier") %>%
-      layout(title = "ROC Curve (Placeholder)",
-             xaxis = list(title = "False Positive Rate"),
-             yaxis = list(title = "True Positive Rate"))
+    tryCatch({
+      actual <- rv$test_data[[rv$target_col]]
+      
+      # Check lengths match
+      if(length(rv$predictions) != length(actual)) {
+        cat("ERROR: Predictions and actual values have different lengths!\n")
+        cat("Predictions length:", length(rv$predictions), "\n")
+        cat("Actual length:", length(actual), "\n")
+        return(NULL)
+      }
+      
+      # Ensure both predictions and actual have the same factor levels
+      all_levels <- union(levels(as.factor(rv$predictions)), levels(as.factor(actual)))
+      predictions_factor <- factor(rv$predictions, levels = all_levels)
+      actual_factor <- factor(actual, levels = all_levels)
+      
+      conf_matrix <- confusionMatrix(predictions_factor, actual_factor)
+      
+      cat("Classification Report:\n\n")
+      print(conf_matrix$byClass)
+      
+    }, error = function(e) {
+      cat("Error generating classification report:\n")
+      cat(e$message, "\n")
+    })
   })
   
   # Model comparison
@@ -817,78 +929,6 @@ server <- function(input, output, session) {
       layout(title = "Model Comparison - Accuracy",
              xaxis = list(title = "Model"),
              yaxis = list(title = "Accuracy (%)"))
-  })
-  
-  # Dynamic prediction inputs
-  output$prediction_inputs <- renderUI({
-    req(rv$processed_data, rv$target_col)
-    
-    features <- setdiff(names(rv$processed_data), rv$target_col)
-    
-    inputs <- lapply(features, function(feat) {
-      if(is.numeric(rv$processed_data[[feat]])) {
-        numericInput(paste0("pred_", feat), 
-                     label = feat,
-                     value = mean(rv$processed_data[[feat]], na.rm = TRUE))
-      } else {
-        selectInput(paste0("pred_", feat),
-                    label = feat,
-                    choices = levels(rv$processed_data[[feat]]))
-      }
-    })
-    
-    do.call(tagList, inputs)
-  })
-  
-  # Make prediction
-  observeEvent(input$predict_btn, {
-    req(rv$model, rv$processed_data, rv$target_col)
-    
-    features <- setdiff(names(rv$processed_data), rv$target_col)
-    
-    new_data <- data.frame(lapply(features, function(feat) {
-      val <- input[[paste0("pred_", feat)]]
-      if(is.factor(rv$processed_data[[feat]])) {
-        factor(val, levels = levels(rv$processed_data[[feat]]))
-      } else {
-        as.numeric(val)
-      }
-    }))
-    
-    names(new_data) <- features
-    
-    prediction <- predict(rv$model, new_data)
-    
-    output$prediction_result <- renderText({
-      as.character(prediction)
-    })
-    
-    # Get probabilities if possible
-    if(input$model_type %in% c("rf", "svm", "nb")) {
-      if(input$model_type == "svm") {
-        probs <- predict(rv$model, new_data, probability = TRUE)
-        probs <- attr(probs, "probabilities")
-      } else {
-        probs <- predict(rv$model, new_data, type = "prob")
-      }
-      
-      output$prediction_probs <- renderPrint({
-        cat("Prediction Probabilities:\n\n")
-        print(probs)
-      })
-      
-      output$prediction_plot <- renderPlotly({
-        prob_df <- data.frame(
-          Class = colnames(probs),
-          Probability = as.numeric(probs[1, ])
-        )
-        
-        plot_ly(prob_df, x = ~Class, y = ~Probability, type = "bar",
-                marker = list(color = '#3498db')) %>%
-          layout(title = "Prediction Confidence",
-                 yaxis = list(title = "Probability", range = c(0, 1)))
-      })
-    }
   })
 }
 

@@ -24,8 +24,6 @@ This comprehensive R Shiny application implements a complete data science lifecy
 - Adjust preprocessing parameters (train/test split, normalization)
 - Configure model hyperparameters in real-time
 - Compare multiple models simultaneously
-- Make single or batch predictions
-- Download prediction results
 
 ## Installation
 
@@ -107,13 +105,3 @@ shiny::runApp()
 - **Confusion Matrix**: Analyze classification breakdown
 - **Classification Report**: Detailed per-class metrics
 - **Model Comparison**: Train and compare all algorithms
-
-### Step 6: Predictions
-- **Single Prediction**:
-  - Enter feature values
-  - Click "Predict Sentiment"
-  - View prediction and confidence scores
-- **Batch Predictions**:
-  - Upload CSV file
-  - Generate predictions
-  - Download results
