@@ -1,6 +1,5 @@
 # Customer Sentiment Classification Shiny Application
-# Author: Data Science Project
-# Description: Interactive ML application for sentiment analysis with classification models
+# Author: Tri Vien Le
 
 library(shiny)
 library(shinydashboard)
